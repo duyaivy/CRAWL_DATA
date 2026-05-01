@@ -1,0 +1,11 @@
+pandas
+requests
+pillow
+opencv-python
+ImageHash
+streamlit
+python-dotenv
+cloudinary
+pymongo
+tqdm
+selenium

@@ -104,6 +104,18 @@ def _cloudinary_public_id(category: str, filename: str) -> str:
     return f"{folder}/{stem}" if folder else stem
 
 
+def _load_existing_mappings(mapping_path: str) -> dict[str, dict]:
+    mappings: dict[str, dict] = {}
+    for row in read_csv_rows(mapping_path):
+        filename = row.get("filename", "")
+        public_id = row.get("public_id", "")
+        if filename:
+            mappings[f"filename:{filename}"] = row
+        if public_id:
+            mappings[f"public_id:{public_id}"] = row
+    return mappings
+
+
 def _load_clean_rows(clean_path: str, category: str | None) -> list[dict]:
     rows = read_csv_rows(clean_path)
     if rows:
@@ -136,6 +148,7 @@ def _upload_one(
     row: dict,
     category: str | None,
     start_id: int,
+    existing_mappings: dict[str, dict],
 ) -> tuple[int, dict, dict | None]:
     image_url = get_original_image_url(row)
     if not image_url:
@@ -170,6 +183,35 @@ def _upload_one(
             "public_id": existing_public_id,
         }
         return index, updated, mapping
+
+    existing_mapping = existing_mappings.get(f"public_id:{public_id}") or existing_mappings.get(
+        f"filename:{filename}"
+    )
+    if existing_mapping and existing_mapping.get("secure_url") and existing_mapping.get("public_id"):
+        logger.info(
+            "[%d/%d] Skip mapped upload: id=%s filename=%s public_id=%s",
+            index + 1,
+            total,
+            row.get("id", ""),
+            filename,
+            existing_mapping.get("public_id", ""),
+        )
+        uploaded_at = row.get("uploaded_at") or now_iso()
+        updated = {
+            **row,
+            "original_image_url": image_url,
+            "cloudinary_url": existing_mapping.get("secure_url", ""),
+            "cloudinary_public_id": existing_mapping.get("public_id", ""),
+            "uploaded_at": uploaded_at,
+            "filename": filename,
+        }
+        mapping = {
+            "filename": filename,
+            "secure_url": existing_mapping.get("secure_url", ""),
+            "public_id": existing_mapping.get("public_id", ""),
+        }
+        return index, updated, mapping
+
     if existing_url and existing_public_id:
         logger.info(
             "[%d/%d] Existing upload is outside expected folder, reuploading: id=%s old_public_id=%s expected_public_id=%s",
@@ -266,13 +308,27 @@ def run_uploader(
         return
 
     worker_count = max(1, workers)
+    existing_mappings = _load_existing_mappings(mapping_path)
     updated_by_index: dict[int, dict] = {}
     mapping_by_index: dict[int, dict] = {}
 
-    logger.info("Uploading %d rows to Cloudinary with %d workers", len(rows), worker_count)
+    logger.info(
+        "Uploading %d rows to Cloudinary with %d workers (%d existing mapping keys)",
+        len(rows),
+        worker_count,
+        len(existing_mappings),
+    )
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [
-            executor.submit(_upload_one, index, len(rows), row, category, start_id)
+            executor.submit(
+                _upload_one,
+                index,
+                len(rows),
+                row,
+                category,
+                start_id,
+                existing_mappings,
+            )
             for index, row in enumerate(rows)
         ]
         for future in as_completed(futures):

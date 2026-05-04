@@ -18,15 +18,18 @@ def main() -> None:
         help="Pipeline step to run",
     )
     parser.add_argument("--category", default=DEFAULT_CATEGORY)
-    parser.add_argument("--target", type=int)
-    parser.add_argument("--keyword", action="append", dest="keywords")
+    parser.add_argument(
+        "--auto-pass-all",
+        action="store_true",
+        help="For validate/all: mark every raw row as passed without downloading or checking images.",
+    )
 
     args = parser.parse_args()
 
     if args.step == "crawl":
-        run_crawler(category=args.category, target=args.target, keywords=args.keywords)
+        run_crawler()
     elif args.step == "validate":
-        run_validator(category=args.category)
+        run_validator(category=args.category, auto_pass_all=args.auto_pass_all)
     elif args.step == "human-validate":
         subprocess.run(
             [
@@ -48,8 +51,8 @@ def main() -> None:
     elif args.step == "import-db":
         run_db_importer(category=args.category)
     elif args.step == "all":
-        run_crawler(category=args.category, target=args.target, keywords=args.keywords)
-        run_validator(category=args.category)
+        run_crawler()
+        run_validator(category=args.category, auto_pass_all=args.auto_pass_all)
         run_uploader(category=args.category)
         run_final_builder(category=args.category)
         run_db_importer(category=args.category)

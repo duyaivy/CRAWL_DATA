@@ -41,6 +41,7 @@ def _build_record(row: dict) -> dict:
 
 def _import_mongodb(records: list[dict]) -> None:
     from pymongo import MongoClient
+    from pymongo import UpdateOne
 
     mongodb_uri = os.getenv("MONGODB_URI", "")
     mongodb_database = os.getenv("MONGODB_DATABASE", "fashion_dataset")
@@ -50,9 +51,39 @@ def _import_mongodb(records: list[dict]) -> None:
     client = MongoClient(mongodb_uri)
     db = client[mongodb_database]
     collection = db[MONGODB_COLLECTION]
-    if records:
-        collection.insert_many(records)
-    logger.info("Inserted %d records into MongoDB", len(records))
+
+    collection.create_index("cloudinaryPublicId")
+    collection.create_index("sourceUrl")
+    operations = []
+    skipped = 0
+    for record in records:
+        cloudinary_public_id = record.get("cloudinaryPublicId", "")
+        source_url = record.get("sourceUrl", "")
+        original_image_url = record.get("originalImageUrl", "")
+
+        if cloudinary_public_id:
+            filter_doc = {"cloudinaryPublicId": cloudinary_public_id}
+        elif source_url:
+            filter_doc = {"sourceUrl": source_url}
+        elif original_image_url:
+            filter_doc = {"originalImageUrl": original_image_url}
+        else:
+            skipped += 1
+            continue
+
+        operations.append(UpdateOne(filter_doc, {"$setOnInsert": record}, upsert=True))
+
+    if not operations:
+        logger.warning("No importable records found. Skipped %d rows.", skipped)
+        return
+
+    result = collection.bulk_write(operations, ordered=False)
+    logger.info(
+        "MongoDB import done: %d inserted, %d already existed, %d skipped",
+        result.upserted_count,
+        len(operations) - result.upserted_count,
+        skipped,
+    )
 
 
 def run_db_importer(category: str | None = None, final_csv_path: str | None = None) -> None:

@@ -5,11 +5,6 @@ from __future__ import annotations
 import logging
 from typing import Iterable
 
-import cv2
-import imagehash
-import numpy as np
-from PIL import UnidentifiedImageError
-
 from src.config import (
     BLUR_THRESHOLD,
     HASH_DISTANCE_THRESHOLD,
@@ -71,7 +66,9 @@ def _iter_rows(rows: list[dict]) -> Iterable[dict]:
     return rows
 
 
-def _blur_score(image_bgr: np.ndarray) -> float:
+def _blur_score(image_bgr) -> float:
+    import cv2
+
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
@@ -81,10 +78,34 @@ def _reject(reason_counts: dict[str, int], reason: str, row: dict) -> None:
     logger.debug("Rejected %s: %s", row.get("id") or row.get("source_url"), reason)
 
 
+def _auto_pass_row(row: dict, category: str | None, validated_at: str) -> dict:
+    image_url = get_original_image_url(row)
+    return {
+        "id": row.get("id", ""),
+        "name": row.get("name", ""),
+        "price": row.get("price", ""),
+        "brand": row.get("brand", ""),
+        "source": row.get("source", ""),
+        "source_url": row.get("source_url", ""),
+        "original_image_url": image_url,
+        "category": row.get("category", category or ""),
+        "final_category": row.get("final_category") or row.get("category", category or ""),
+        "width": row.get("width", ""),
+        "height": row.get("height", ""),
+        "blur_score": row.get("blur_score", ""),
+        "image_hash": row.get("image_hash", ""),
+        "auto_status": "pass",
+        "auto_reason": "auto_pass_all",
+        "crawled_at": row.get("crawled_at", ""),
+        "validated_at": validated_at,
+    }
+
+
 def run_validator(
     category: str | None = None,
     raw_csv_path: str | None = None,
     validated_csv_path: str | None = None,
+    auto_pass_all: bool = False,
 ) -> None:
     ensure_pipeline_dirs()
     raw_path = raw_csv_path or (category_raw_csv_path(category) if category else RAW_CSV_PATH)
@@ -98,10 +119,26 @@ def run_validator(
         write_csv_rows(out_path, VALIDATED_COLUMNS, [])
         return
 
+    validated_at = now_iso()
+    if auto_pass_all:
+        accepted = [_auto_pass_row(row, category, validated_at) for row in rows]
+        write_csv_rows(out_path, VALIDATED_COLUMNS, accepted)
+        logger.info(
+            "Auto-pass enabled: wrote %d rows from %s -> %s without image validation",
+            len(accepted),
+            raw_path,
+            out_path,
+        )
+        return
+
     seen_source_urls: set[str] = set()
     seen_image_urls: set[str] = set()
-    seen_hashes: list[imagehash.ImageHash] = []
-    validated_at = now_iso()
+    import cv2
+    import imagehash
+    import numpy as np
+    from PIL import UnidentifiedImageError
+
+    seen_hashes = []
     accepted: list[dict] = []
     reject_counts: dict[str, int] = {}
 

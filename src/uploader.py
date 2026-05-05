@@ -26,6 +26,7 @@ from src.config import (
 from src.utils import (
     download_image_to_memory,
     get_original_image_url,
+    is_asos_image_url,
     now_iso,
     read_csv_rows,
     write_csv_rows,
@@ -38,7 +39,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-CLOUDINARY_COLUMNS: list[str] = ["filename", "secure_url", "public_id"]
+CLOUDINARY_COLUMNS: list[str] = ["filename", "secure_url", "public_id", "original_image_url"]
 
 UPDATED_CLEAN_COLUMNS: list[str] = [
     "id",
@@ -101,8 +102,18 @@ def _configure_cloudinary() -> None:
 
 def _filename(row: dict, index: int, start_id: int) -> str:
     existing = row.get("filename", "")
-    if existing:
+    source = (row.get("source") or "").strip().lower()
+    row_id = (row.get("id") or "").strip()
+
+    # ASOS rows previously collided with old numeric public ids such as
+    # quan_jean/10000. Keep explicit non-numeric filenames, but migrate old
+    # generated numeric names to source-scoped names.
+    if existing and not (source == "asos" and Path(existing).stem.isdigit()):
         return existing
+
+    if source == "asos" and row_id:
+        return f"asos_{row_id}.jpg"
+
     return f"{start_id + index}.jpg"
 
 
@@ -168,11 +179,14 @@ def _classify_upload_error(exc: Exception, image_url: str) -> tuple[str, str, st
 
 
 def _should_retry_with_local_upload(error_source: str, error_reason: str) -> bool:
-    return error_source == "asos_image_url" and error_reason == "http_403_forbidden"
+    return error_source == "asos_image_url" or error_reason in {
+        "http_403_forbidden",
+        "remote_load_failed",
+    }
 
 
 def _is_asos_image_url(image_url: str) -> bool:
-    return "images.asos-media.com" in image_url.lower()
+    return is_asos_image_url(image_url)
 
 
 def _download_image_with_retries(image_url: str, filename: str) -> bytes:
@@ -301,13 +315,22 @@ def _upload_one(
             "filename": filename,
             "secure_url": existing_url,
             "public_id": existing_public_id,
+            "original_image_url": image_url,
         }
         return index, updated, mapping
 
     existing_mapping = existing_mappings.get(f"public_id:{public_id}") or existing_mappings.get(
         f"filename:{filename}"
     )
-    if existing_mapping and existing_mapping.get("secure_url") and existing_mapping.get("public_id"):
+    mapping_image_url = existing_mapping.get("original_image_url", "") if existing_mapping else ""
+    can_reuse_mapping = bool(
+        existing_mapping
+        and existing_mapping.get("secure_url")
+        and existing_mapping.get("public_id")
+        and mapping_image_url
+        and mapping_image_url == image_url
+    )
+    if can_reuse_mapping:
         logger.info(
             "[%d/%d] Skip mapped upload: id=%s filename=%s public_id=%s",
             index + 1,
@@ -329,8 +352,21 @@ def _upload_one(
             "filename": filename,
             "secure_url": existing_mapping.get("secure_url", ""),
             "public_id": existing_mapping.get("public_id", ""),
+            "original_image_url": image_url,
         }
         return index, updated, mapping
+    if existing_mapping and not mapping_image_url:
+        logger.info(
+            (
+                "[%d/%d] Ignoring legacy mapping without original_image_url: "
+                "id=%s filename=%s public_id=%s"
+            ),
+            index + 1,
+            total,
+            row.get("id", ""),
+            filename,
+            public_id,
+        )
 
     if existing_url and existing_public_id:
         logger.info(
@@ -354,10 +390,19 @@ def _upload_one(
             public_id,
             image_url,
         )
-        upload_result = cloudinary.uploader.upload(
-    image_url,
-    **_cloudinary_upload_options(folder, public_id_stem, filename),
-)
+        if _is_asos_image_url(image_url):
+            used_local_upload = True
+            upload_result = _upload_from_local_memory(
+                image_url,
+                folder,
+                public_id_stem,
+                filename,
+            )
+        else:
+            upload_result = cloudinary.uploader.upload(
+                image_url,
+                **_cloudinary_upload_options(folder, public_id_stem, filename),
+            )
     except Exception as exc:  # noqa: BLE001
         error_source, error_reason, error_hint = _classify_upload_error(exc, image_url)
         if not used_local_upload and _should_retry_with_local_upload(error_source, error_reason):
@@ -450,6 +495,7 @@ def _upload_one(
         "filename": filename,
         "secure_url": secure_url,
         "public_id": uploaded_public_id,
+        "original_image_url": image_url,
     }
     return index, updated, mapping
 

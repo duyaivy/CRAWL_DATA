@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import csv
 import io
+import random
 import time
 from datetime import datetime
 from pathlib import Path
@@ -14,8 +15,10 @@ from typing import Iterable
 import requests
 from PIL import Image
 
-from src.config import DOWNLOAD_USER_AGENT, REQUEST_TIMEOUT_SEC
-import requests
+try:
+    from curl_cffi import requests as curl_requests
+except ImportError:  # pragma: no cover - optional dependency
+    curl_requests = None
 
 session = requests.Session()
 
@@ -67,7 +70,26 @@ def normalize_category(value: str) -> str:
 def get_original_image_url(row: dict) -> str:
     return (row.get("original_image_url") or row.get("image_url") or "").strip()
 
+
+def is_asos_image_url(url: str) -> bool:
+    return "images.asos-media.com" in (url or "").lower()
+
+
 def download_image_to_memory(url: str, timeout_sec: int = 60) -> bytes:
+    if is_asos_image_url(url) and curl_requests is not None:
+        response = curl_requests.get(
+            url,
+            impersonate="chrome120",
+            timeout=timeout_sec,
+            headers={
+                "Referer": "https://www.asos.com/",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            },
+        )
+        response.raise_for_status()
+        time.sleep(random.uniform(1.5, 3.0))
+        return response.content
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://www.asos.com/",

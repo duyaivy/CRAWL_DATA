@@ -6,9 +6,9 @@ from pathlib import Path
 
 # Category -> keyword list. Keep values as lists so one category can crawl
 # several search terms while still writing a single category CSV.
-CATEGORIES: dict[str, list[str]] = {"ao_khoac": [ "jacket", "áo khoác","ao khoac"]}
+CATEGORIES: dict[str, list[str]] = {"quan_jean": ["jeans"]}
 
-DEFAULT_CATEGORY: str = "ao_khoac"
+DEFAULT_CATEGORY: str = "quan_jean"
 TARGET_PER_CATEGORY: int = 500
 MAX_PAGES_PER_CATEGORY: int = 100
 

@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import BytesIO
 from pathlib import Path
+from threading import Lock
+from time import sleep
 
 import cloudinary
 import cloudinary.uploader
@@ -20,7 +23,13 @@ from src.config import (
     category_reviewed_csv_path,
     ensure_pipeline_dirs,
 )
-from src.utils import get_original_image_url, now_iso, read_csv_rows, write_csv_rows
+from src.utils import (
+    download_image_to_memory,
+    get_original_image_url,
+    now_iso,
+    read_csv_rows,
+    write_csv_rows,
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -67,6 +76,11 @@ REVIEWED_TO_CLEAN_COLUMNS: list[str] = [
     "image_hash",
 ]
 
+LOCAL_DOWNLOAD_TIMEOUT_SEC = 45
+LOCAL_DOWNLOAD_RETRIES = 3
+ASOS_DOWNLOAD_DELAY_SEC = 2.0
+ASOS_DOWNLOAD_LOCK = Lock()
+
 
 def _configure_cloudinary() -> None:
     cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "")
@@ -102,6 +116,112 @@ def _cloudinary_public_id(category: str, filename: str) -> str:
     stem = Path(filename).stem
     folder = _category_folder(category)
     return f"{folder}/{stem}" if folder else stem
+
+
+def _cloudinary_upload_options(folder: str, public_id_stem: str, filename: str) -> dict:
+    return {
+        "folder": folder or None,
+        "public_id": public_id_stem,
+        "overwrite": False,
+        "resource_type": "image",
+        "filename": filename,
+    }
+
+
+def _classify_upload_error(exc: Exception, image_url: str) -> tuple[str, str, str]:
+    message = str(exc)
+    lower_message = message.lower()
+    lower_url = image_url.lower()
+
+    if "error in loading" in lower_message:
+        host = "asos" if "images.asos-media.com" in lower_url else "remote"
+        if "403 forbidden" in lower_message:
+            return (
+                f"{host}_image_url",
+                "http_403_forbidden",
+                "Source image host rejected Cloudinary's remote fetch.",
+            )
+        return (
+            f"{host}_image_url",
+            "remote_load_failed",
+            "Cloudinary could not load the source image URL.",
+        )
+
+    if "images.asos-media.com" in lower_url:
+        if "403" in lower_message or "forbidden" in lower_message:
+            return (
+                "asos_image_url",
+                "http_403_forbidden",
+                "Source image host rejected the local download.",
+            )
+        return (
+            "asos_image_url",
+            type(exc).__name__,
+            "ASOS image failed during local download or Cloudinary file upload.",
+        )
+
+    return (
+        "cloudinary",
+        type(exc).__name__,
+        "Cloudinary upload request failed before or during asset creation.",
+    )
+
+
+def _should_retry_with_local_upload(error_source: str, error_reason: str) -> bool:
+    return error_source == "asos_image_url" and error_reason == "http_403_forbidden"
+
+
+def _is_asos_image_url(image_url: str) -> bool:
+    return "images.asos-media.com" in image_url.lower()
+
+
+def _download_image_with_retries(image_url: str, filename: str) -> bytes:
+    last_exc: Exception | None = None
+    for attempt in range(1, LOCAL_DOWNLOAD_RETRIES + 1):
+        try:
+            return download_image_to_memory(
+                image_url,
+                timeout_sec=LOCAL_DOWNLOAD_TIMEOUT_SEC,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt == LOCAL_DOWNLOAD_RETRIES:
+                raise
+            logger.info(
+                (
+                    "Local image download failed, retrying: filename=%s "
+                    "attempt=%d/%d timeout_sec=%d error=%s"
+                ),
+                filename,
+                attempt,
+                LOCAL_DOWNLOAD_RETRIES,
+                LOCAL_DOWNLOAD_TIMEOUT_SEC,
+                exc,
+            )
+            sleep(2.0 * attempt)
+
+    raise RuntimeError(f"Local image download failed: {last_exc}")
+
+
+def _upload_from_local_memory(
+    image_url: str,
+    folder: str,
+    public_id_stem: str,
+    filename: str,
+) -> dict:
+    if _is_asos_image_url(image_url):
+        with ASOS_DOWNLOAD_LOCK:
+            image_data = _download_image_with_retries(image_url, filename)
+            sleep(ASOS_DOWNLOAD_DELAY_SEC)
+    else:
+        image_data = _download_image_with_retries(image_url, filename)
+
+    image_file = BytesIO(image_data)
+    image_file.name = filename
+    return cloudinary.uploader.upload(
+        image_file,
+        **_cloudinary_upload_options(folder, public_id_stem, filename),
+    )
 
 
 def _load_existing_mappings(mapping_path: str) -> dict[str, dict]:
@@ -222,6 +342,7 @@ def _upload_one(
             public_id,
         )
 
+    used_local_upload = False
     try:
         logger.info(
             "[%d/%d] Uploading: id=%s filename=%s folder=%s public_id=%s image_url=%s",
@@ -234,23 +355,76 @@ def _upload_one(
             image_url,
         )
         upload_result = cloudinary.uploader.upload(
-            image_url,
-            folder=folder or None,
-            public_id=public_id_stem,
-            overwrite=False,
-            resource_type="image",
-        )
+    image_url,
+    **_cloudinary_upload_options(folder, public_id_stem, filename),
+)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[%d/%d] Upload failed: id=%s filename=%s public_id=%s error=%s",
-            index + 1,
-            total,
-            row.get("id", ""),
-            filename,
-            public_id,
-            exc,
-        )
-        return index, row, None
+        error_source, error_reason, error_hint = _classify_upload_error(exc, image_url)
+        if not used_local_upload and _should_retry_with_local_upload(error_source, error_reason):
+            logger.info(
+                (
+                    "[%d/%d] Remote upload blocked by source, retrying via local download: "
+                    "id=%s filename=%s public_id=%s image_url=%s"
+                ),
+                index + 1,
+                total,
+                row.get("id", ""),
+                filename,
+                public_id,
+                image_url,
+            )
+            try:
+                upload_result = _upload_from_local_memory(
+                    image_url,
+                    folder,
+                    public_id_stem,
+                    filename,
+                )
+                logger.info(
+                    "[%d/%d] Local retry uploaded: id=%s filename=%s public_id=%s",
+                    index + 1,
+                    total,
+                    row.get("id", ""),
+                    filename,
+                    upload_result.get("public_id", public_id),
+                )
+            except Exception as retry_exc:  # noqa: BLE001
+                logger.warning(
+                    (
+                        "[%d/%d] Local retry failed: id=%s filename=%s public_id=%s "
+                        "source=local_download_or_upload reason=%s image_url=%s "
+                        "original_error=%s retry_error=%s"
+                    ),
+                    index + 1,
+                    total,
+                    row.get("id", ""),
+                    filename,
+                    public_id,
+                    type(retry_exc).__name__,
+                    image_url,
+                    exc,
+                    retry_exc,
+                )
+                return index, row, None
+        else:
+            logger.warning(
+                (
+                    "[%d/%d] Upload failed: id=%s filename=%s public_id=%s "
+                    "source=%s reason=%s error_class=%s image_url=%s hint=%s error=%s"
+                ),
+                index + 1,
+                total,
+                row.get("id", ""),
+                filename,
+                public_id,
+                error_source,
+                error_reason,
+                type(exc).__name__,
+                image_url,
+                error_hint,
+                exc,
+            )
+            return index, row, None
 
     secure_url = upload_result.get("secure_url", "")
     uploaded_at = now_iso()

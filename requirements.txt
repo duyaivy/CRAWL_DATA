@@ -9,3 +9,4 @@ cloudinary
 pymongo
 tqdm
 selenium
+curl_cffi

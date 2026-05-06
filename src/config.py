@@ -6,15 +6,15 @@ from pathlib import Path
 
 # Category -> keyword list. Keep values as lists so one category can crawl
 # several search terms while still writing a single category CSV.
-CATEGORIES: dict[str, list[str]] = {"sweater_hoodie": ["ao sweater"]}
+CATEGORIES: dict[str, list[str]] = {"vay": ["mini dress"]}
 
-DEFAULT_CATEGORY: str = "sweater_hoodie"
-TARGET_PER_CATEGORY: int = 200
+DEFAULT_CATEGORY: str = "vay"
+TARGET_PER_CATEGORY: int = 300
 MAX_PAGES_PER_CATEGORY: int = 100
 
 # Step 1 crawler source. Change this value only when switching marketplace.
 # Valid values: "lazada", "tiki", "asos".
-CRAWLER_SOURCE: str = "lazada"
+CRAWLER_SOURCE: str = "asos"
 
 # ---------------------------------------------------------------------------
 # Pipeline paths

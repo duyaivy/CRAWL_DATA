@@ -3,6 +3,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 from urllib.parse import urlencode
 
 import requests
@@ -57,45 +58,92 @@ CSV_PATH = "data/01_raw_products_tiki.csv"
 # ==============================
 
 
-def load_existing(csv_path):
-    seen_urls = set()
-    seen_images = set()
+def parse_row_id(value: str | None) -> int:
+    try:
+        return int((value or "").strip())
+    except ValueError:
+        return 0
+
+
+def is_header_row(row: list[str]) -> bool:
+    normalized = [column.strip().lower().lstrip("\ufeff") for column in row]
+    return normalized[: len(OUTPUT_COLUMNS)] == OUTPUT_COLUMNS
+
+
+def normalize_csv_row(row: dict) -> dict:
+    return {column: row.get(column, "") for column in OUTPUT_COLUMNS}
+
+
+def read_existing_rows(csv_path: str) -> list[dict]:
+    path = Path(csv_path)
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        raw_rows = list(csv.reader(f))
+
+    if not raw_rows:
+        return []
+
+    has_header = is_header_row(raw_rows[0])
+    data_rows = raw_rows[1:] if has_header else raw_rows
+    fieldnames = raw_rows[0] if has_header else OUTPUT_COLUMNS
+
+    rows = []
+    for raw_row in data_rows:
+        if not any(cell.strip() for cell in raw_row):
+            continue
+        rows.append(normalize_csv_row(dict(zip(fieldnames, raw_row))))
+
+    return rows
+
+
+def load_existing(csv_path: str) -> tuple[set[str], set[str], int]:
+    seen_urls: set[str] = set()
+    seen_images: set[str] = set()
     last_id = 0
 
-    if not Path(csv_path).exists():
-        return seen_urls, seen_images, last_id
-
-    with open(csv_path, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row.get("source_url"):
-                seen_urls.add(row["source_url"])
-            if row.get("image_url"):
-                seen_images.add(row["image_url"])
-            try:
-                last_id = max(last_id, int(row["id"]))
-            except (TypeError, ValueError):
-                pass
+    for row in read_existing_rows(csv_path):
+        source_url = row.get("source_url", "").strip()
+        image_url = row.get("image_url", "").strip()
+        if source_url:
+            seen_urls.add(source_url)
+        if image_url:
+            seen_images.add(image_url)
+        last_id = max(last_id, parse_row_id(row.get("id")))
 
     return seen_urls, seen_images, last_id
 
 
-def ensure_header(csv_path):
+def ensure_header(csv_path: str) -> None:
     path = Path(csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    if not path.exists():
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
-            writer.writeheader()
+    if not path.exists() or path.stat().st_size == 0:
+        rows: list[dict] = []
+    else:
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            first_row = next(csv.reader(f), [])
+        if is_header_row(first_row):
+            return
+        rows = read_existing_rows(csv_path)
+
+    write_rows(csv_path, rows)
 
 
-def append_rows(csv_path, rows):
+def write_rows(csv_path: str, rows: Iterable[dict]) -> None:
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
+        writer.writeheader()
+        writer.writerows(normalize_csv_row(row) for row in rows)
+
+
+def append_rows(csv_path: str, rows: list[dict]) -> None:
     if not rows:
         return
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
-        writer.writerows(rows)
+        writer.writerows(normalize_csv_row(row) for row in rows)
 
 
 # ==============================

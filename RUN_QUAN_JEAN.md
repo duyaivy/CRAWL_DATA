@@ -201,7 +201,7 @@ python -m src.import_mongo
 
 ```powershell
 python main.py crawl
-python main.py validate
+python main.py validate --auto-pass-all
 python main.py human-validate
 python -m src.upload_cloudinary
 python -m src.build_mongo

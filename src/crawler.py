@@ -20,6 +20,7 @@ def run_crawler(
     keywords: list[str] | None = None,
     raw_csv_path: str | None = None,
     max_pages: int | None = None,
+    skip_pages: int = 0,
     source: CrawlerSource | None = None,
 ) -> None:
     if source is None:
@@ -41,6 +42,7 @@ def run_crawler(
             keywords=keywords,
             raw_csv_path=raw_csv_path,
             max_pages=max_pages,
+            skip_pages=skip_pages,
         )
         return
 

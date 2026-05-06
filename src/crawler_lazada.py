@@ -15,11 +15,13 @@ Gợi ý config:
 - Nếu không có thì dùng fallback bên dưới.
 """
 
+import argparse
 import csv
 import json
 import logging
 import random
 import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -537,10 +539,13 @@ def _crawl_category(
     csv_path: str,
     target: int,
     max_pages: int,
+    skip_pages: int = 0,
 ) -> tuple[int, int, int, int]:
     collected = 0
     skipped_dup = 0
     consecutive_empty_pages = 0
+    start_page = skip_pages + 1
+    end_page = skip_pages + max_pages
 
     pbar = tqdm(
         total=target,
@@ -550,7 +555,7 @@ def _crawl_category(
     )
 
     try:
-        for page_num in range(1, max_pages + 1):
+        for page_num in range(start_page, end_page + 1):
             if collected >= target:
                 break
 
@@ -621,6 +626,7 @@ def run_crawler(
     keywords: list[str] | None = None,
     raw_csv_path: str | None = None,
     max_pages: int | None = None,
+    skip_pages: int = 0,
 ) -> None:
     ensure_pipeline_dirs()
     selected_categories = [category] if category else list(CATEGORIES.keys())
@@ -630,6 +636,8 @@ def run_crawler(
         raise ValueError("--target must be greater than 0")
     if page_limit <= 0:
         raise ValueError("--max-pages must be greater than 0")
+    if skip_pages < 0:
+        raise ValueError("--skip-pages must be greater than or equal to 0")
 
     driver = _build_driver()
     logger.info("Chrome WebDriver started.")
@@ -649,6 +657,13 @@ def run_crawler(
                     break
 
                 logger.info("[%s] Starting crawl for keyword '%s'", category_key, keyword)
+                if skip_pages:
+                    logger.info(
+                        "[%s] Skipping first %d Lazada pages; starting at page %d",
+                        category_key,
+                        skip_pages,
+                        skip_pages + 1,
+                    )
 
                 remaining_target = target_count - collected
                 got, skipped_dup, empty_streak, next_id = _crawl_category(
@@ -661,6 +676,7 @@ def run_crawler(
                     csv_path=csv_path,
                     target=remaining_target,
                     max_pages=page_limit,
+                    skip_pages=skip_pages,
                 )
                 collected += got
                 skipped += skipped_dup
@@ -686,5 +702,40 @@ def run_crawler(
             logger.warning("Error closing WebDriver: %s", exc)
 
 
+def _normalize_skip_page_args(argv: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for arg in argv:
+        match = re.fullmatch(r"--skip-(\d+)", arg)
+        if match:
+            normalized.extend(["--skip-pages", match.group(1)])
+        else:
+            normalized.append(arg)
+    return normalized
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Crawl product metadata from Lazada")
+    parser.add_argument("--category")
+    parser.add_argument("--target", type=int)
+    parser.add_argument("--keyword", dest="keywords", action="append")
+    parser.add_argument("--raw-csv-path")
+    parser.add_argument("--max-pages", type=int)
+    parser.add_argument(
+        "--skip-pages",
+        type=int,
+        default=0,
+        help="Skip the first N Lazada search result pages before crawling.",
+    )
+    return parser.parse_args(_normalize_skip_page_args(argv))
+
+
 if __name__ == "__main__":
-    run_crawler()
+    args = _parse_args(sys.argv[1:])
+    run_crawler(
+        category=args.category,
+        target=args.target,
+        keywords=args.keywords,
+        raw_csv_path=args.raw_csv_path,
+        max_pages=args.max_pages,
+        skip_pages=args.skip_pages,
+    )

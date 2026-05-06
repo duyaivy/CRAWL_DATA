@@ -120,16 +120,13 @@ def normalize_image_url(url):
 def select_product_images(product):
     """
     Return up to 2 unique images for one product.
-    Priority: additional image #5, additional image #3, fallback #4, then primary.
+    Priority: primary image, then additional image #2.
     """
     additional = product.get("additionalImageUrls", [])
-    candidates = []
+    candidates = [(0, normalize_image_url(product.get("imageUrl", "")))]
 
-    for image_index, list_index in ((5, 4), (3, 2), (4, 3)):
-        if len(additional) > list_index:
-            candidates.append((image_index, normalize_image_url(additional[list_index])))
-
-    candidates.append((0, normalize_image_url(product.get("imageUrl", ""))))
+    if len(additional) > 1:
+        candidates.append((2, normalize_image_url(additional[1])))
 
     selected = []
     seen = set()
